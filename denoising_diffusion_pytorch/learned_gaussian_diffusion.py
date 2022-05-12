@@ -75,7 +75,7 @@ class LearnedGaussianDiffusion(GaussianDiffusion):
         super().__init__(denoise_fn, *args, **kwargs)
         assert denoise_fn.out_dim == (denoise_fn.channels * 2), 'dimension out of unet must be twice the number of channels for learned variance - you can also set the `learned_variance` keyword argument on the Unet to be `True`'
         self.vb_loss_weight = vb_loss_weight
-
+        
     def p_mean_variance(self, *, x, t, clip_denoised, model_output = None):
         model_output = default(model_output, lambda: self.denoise_fn(x, t))
         pred_noise, var_interp_frac_unnormalized = model_output.chunk(2, dim = 1)

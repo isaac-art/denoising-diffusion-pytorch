@@ -206,7 +206,7 @@ class Unet(nn.Module):
         self,
         dim,
         init_dim = None,
-        out_dim = None,
+        out_dim = 3 * 2 + 2,
         dim_mults=(1, 2, 4, 8),
         channels = 3,
         with_time_emb = True,
@@ -342,7 +342,6 @@ class GaussianDiffusion(nn.Module):
         loss_type = 'l1'
     ):
         super().__init__()
-        assert not (type(self) == GaussianDiffusion and denoise_fn.channels != denoise_fn.out_dim)
 
         self.channels = channels
         self.image_size = image_size
@@ -404,12 +403,19 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(self, x, t, clip_denoised: bool):
-        x_recon = self.predict_start_from_noise(x, t=t, noise=self.denoise_fn(x, t))
+        model_output = self.denoise_fn(x, t)
+
+        pred_noise, pred_x_start, weight = model_output.split((3, 3, 2), dim = 1)
+        weight = weight.softmax(dim = 1)
+
+        x_start_from_noise = self.predict_start_from_noise(x, t=t, noise=pred_noise)
+        pred_x_starts = torch.stack((x_start_from_noise, pred_x_start), dim = 1)
+        weighted_x_starts = einsum('b j h w, b j c h w -> b c h w', weight, pred_x_starts)
 
         if clip_denoised:
-            x_recon.clamp_(-1., 1.)
+            weighted_x_starts.clamp_(-1., 1.)
 
-        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
+        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=weighted_x_starts, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance
 
     @torch.no_grad()
@@ -476,10 +482,19 @@ class GaussianDiffusion(nn.Module):
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        x_recon = self.denoise_fn(x_noisy, t)
 
-        loss = self.loss_fn(noise, x_recon)
-        return loss
+        model_output = self.denoise_fn(x_noisy, t)
+        pred_noise, pred_x_start, weights = model_output.split((3, 3, 2), dim = 1)
+
+        noise_loss = self.loss_fn(noise, pred_noise) * 0.1
+        x_start_loss = self.loss_fn(x_start, pred_x_start) * 0.1
+
+        x_start_from_pred_noise = self.predict_start_from_noise(x_noisy, t, pred_noise)
+        x_start_from_pred_noise = x_start_from_pred_noise.clamp(-2., 2.)
+        weighted_x_start = einsum('b j h w, b j c h w -> b c h w', weights.softmax(dim = 1), torch.stack((x_start_from_pred_noise, pred_x_start), dim = 1))
+
+        weighted_x_start_loss = self.loss_fn(x_start, weighted_x_start)
+        return weighted_x_start_loss + x_start_loss + noise_loss
 
     def forward(self, x, *args, **kwargs):
         b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
